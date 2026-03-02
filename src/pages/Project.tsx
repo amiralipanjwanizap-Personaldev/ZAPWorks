@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { Plus, Trash2, Edit2, Save, X, ArrowLeft, DollarSign, Percent, Calculator } from 'lucide-react';
