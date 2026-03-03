@@ -104,64 +104,202 @@ export default function Project() {
     if (!project) return;
 
     const doc = new jsPDF();
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 15;
     
-    // Add Logo
+    // Colors
+    const primaryColor = '#0F172A'; // Dark Slate
+    const secondaryColor = '#64748B'; // Slate 500
+    const lineColor = '#E2E8F0'; // Slate 200
+
+    // --- 1. Header Section ---
+    let currentY = 20;
+
+    // Logo (Left)
     if (businessSettings?.logo_url) {
       try {
         const img = new Image();
         img.src = businessSettings.logo_url;
-        doc.addImage(img, 'PNG', 14, 10, 30, 30);
+        doc.addImage(img, 'PNG', margin, currentY, 25, 25);
       } catch (e) {
         console.error('Error adding logo', e);
       }
     }
 
-    // Add Business Details
-    doc.setFontSize(10);
-    const startY = businessSettings?.logo_url ? 45 : 20;
-    doc.text(businessSettings?.business_name || '', 14, startY);
-    doc.text(businessSettings?.address || '', 14, startY + 5);
-    doc.text(`Phone: ${businessSettings?.phone || ''}`, 14, startY + 10);
-    doc.text(`Email: ${businessSettings?.email || ''}`, 14, startY + 15);
+    // Company Details (Left, under logo)
+    const logoHeight = businessSettings?.logo_url ? 30 : 0;
+    let headerTextY = currentY + logoHeight + (businessSettings?.logo_url ? 5 : 0);
+    
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(18);
+    doc.setTextColor(primaryColor);
+    doc.text(businessSettings?.business_name || 'Company Name', margin, headerTextY);
+    
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(secondaryColor);
+    headerTextY += 6;
+    
+    const details = [
+      businessSettings?.address,
+      businessSettings?.phone ? `Phone: ${businessSettings.phone}` : '',
+      businessSettings?.email ? `Email: ${businessSettings.email}` : '',
+      businessSettings?.registration_number ? `Reg: ${businessSettings.registration_number}` : ''
+    ].filter(Boolean);
 
-    // Project Details
-    doc.setFontSize(16);
-    doc.text(`Quote for ${project.client_name}`, 120, 20);
-    doc.setFontSize(10);
-    doc.text(`Event: ${project.event_type}`, 120, 30);
-    doc.text(`Date: ${new Date().toLocaleDateString()}`, 120, 35);
-    doc.text(`Currency: ${project.base_currency}`, 120, 40);
+    details.forEach(detail => {
+      doc.text(detail, margin, headerTextY);
+      headerTextY += 5;
+    });
 
-    // Table
+    // Right Column (Title & Meta)
+    const rightColX = pageWidth - margin;
+    let metaY = 20;
+    
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(24);
+    doc.setTextColor(primaryColor);
+    doc.text('QUOTATION', rightColX, metaY, { align: 'right' });
+    
+    metaY += 10;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(secondaryColor);
+    
+    const quoteNum = `Q-${project.id.substring(0, 8).toUpperCase()}`;
+    doc.text(`Quote #: ${quoteNum}`, rightColX, metaY, { align: 'right' });
+    metaY += 5;
+    
+    const issueDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    doc.text(`Date: ${issueDate}`, rightColX, metaY, { align: 'right' });
+    
+    // Separation Line
+    const lineY = Math.max(headerTextY, metaY) + 5;
+    doc.setDrawColor(lineColor);
+    doc.setLineWidth(0.5);
+    doc.line(margin, lineY, pageWidth - margin, lineY);
+
+    // --- 2. Client Information Block ---
+    currentY = lineY + 10;
+    
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(secondaryColor);
+    doc.text('BILL TO:', margin, currentY);
+    
+    currentY += 6;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.setTextColor(primaryColor);
+    doc.text(project.client_name, margin, currentY);
+    
+    currentY += 5;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(secondaryColor);
+    doc.text(project.event_type, margin, currentY);
+
+    // --- 3. Item Table ---
+    currentY += 15;
+    
+    const tableHeaders = [['Description', 'Category', 'Qty', 'Days', 'Rate', 'Amount']];
+    
     const tableData = items.map(item => [
-      item.category,
       item.item_name,
+      item.category,
+      item.quantity.toString(),
+      item.days.toString(),
       `${item.original_currency} ${item.cost_per_unit.toFixed(2)}`,
-      `${item.quantity} x ${item.days}d`,
       `${project.base_currency} ${item.converted_subtotal.toFixed(2)}`
     ]);
 
     autoTable(doc, {
-      startY: startY + 25,
-      head: [['Category', 'Item', 'Cost/Unit', 'Qty/Days', `Subtotal (${project.base_currency})`]],
+      startY: currentY,
+      head: tableHeaders,
       body: tableData,
+      theme: 'plain',
+      styles: {
+        font: 'helvetica',
+        fontSize: 9,
+        cellPadding: 3,
+        lineColor: lineColor,
+        lineWidth: 0.1,
+      },
+      headStyles: {
+        fillColor: '#F8FAFC',
+        textColor: primaryColor,
+        fontStyle: 'bold',
+        halign: 'left'
+      },
+      columnStyles: {
+        0: { cellWidth: 'auto', halign: 'left' },
+        1: { cellWidth: 30, halign: 'left' },
+        2: { cellWidth: 15, halign: 'right' },
+        3: { cellWidth: 15, halign: 'right' },
+        4: { cellWidth: 30, halign: 'right' },
+        5: { cellWidth: 30, halign: 'right', fontStyle: 'bold' }
+      },
+      margin: { left: margin, right: margin }
     });
 
-    // Summary
+    // --- 4. Totals Section ---
+    const finalY = (doc as any).lastAutoTable.finalY + 10;
+    const totalsX = pageWidth - margin;
+    
     const baseTotal = items.reduce((sum, item) => sum + item.converted_subtotal, 0);
     const profitAmount = baseTotal * (project.profit_margin / 100);
     const taxAmount = (baseTotal + profitAmount) * (project.tax_percent / 100);
     const finalPrice = baseTotal + profitAmount + taxAmount;
 
-    const finalY = (doc as any).lastAutoTable.finalY + 10;
-    doc.text(`Base Cost: ${baseTotal.toFixed(2)}`, 140, finalY);
-    doc.text(`Profit (${project.profit_margin}%): ${profitAmount.toFixed(2)}`, 140, finalY + 5);
-    doc.text(`Tax (${project.tax_percent}%): ${taxAmount.toFixed(2)}`, 140, finalY + 10);
-    doc.setFontSize(12);
-    doc.setFont('helvetica', 'bold');
-    doc.text(`Total: ${project.base_currency} ${finalPrice.toFixed(2)}`, 140, finalY + 20);
+    let totalsY = finalY;
+    const lineHeight = 6;
 
-    doc.save(`${project.client_name}_Quote.pdf`);
+    const addTotalLine = (label: string, value: string, isBold = false, isLarge = false) => {
+      doc.setFont('helvetica', isBold ? 'bold' : 'normal');
+      doc.setFontSize(isLarge ? 12 : 10);
+      doc.setTextColor(isBold ? primaryColor : secondaryColor);
+      doc.text(label, totalsX - 40, totalsY, { align: 'right' });
+      doc.text(value, totalsX, totalsY, { align: 'right' });
+      totalsY += lineHeight;
+    };
+
+    addTotalLine('Subtotal:', `${project.base_currency} ${baseTotal.toFixed(2)}`);
+    if (profitAmount > 0) {
+        addTotalLine(`Margin (${project.profit_margin}%):`, `${project.base_currency} ${profitAmount.toFixed(2)}`);
+    }
+    if (taxAmount > 0) {
+        addTotalLine(`Tax (${project.tax_percent}%):`, `${project.base_currency} ${taxAmount.toFixed(2)}`);
+    }
+    
+    totalsY += 2;
+    addTotalLine('Total:', `${project.base_currency} ${finalPrice.toFixed(2)}`, true, true);
+
+    // --- 5. Footer ---
+    let footerY = Math.max(totalsY + 20, pageHeight - 30);
+    
+    doc.setDrawColor(lineColor);
+    doc.line(margin, footerY, pageWidth - margin, footerY);
+    footerY += 8;
+    
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(primaryColor);
+    doc.text('Terms & Conditions', margin, footerY);
+    
+    footerY += 5;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(secondaryColor);
+    doc.text('Payment is due within 30 days. Please include quote number on invoice.', margin, footerY);
+    
+    footerY += 8;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(primaryColor);
+    doc.text('Thank you for your business!', margin, footerY);
+
+    doc.save(`${project.client_name.replace(/\s+/g, '_')}_Quote.pdf`);
   };
 
   const handleAddItem = async (e: React.FormEvent) => {
