@@ -11,6 +11,9 @@ import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import Project from './pages/Project';
 import Pricing from './pages/Pricing';
+import Templates from './pages/Templates';
+import TemplateEditor from './pages/TemplateEditor';
+import Settings from './pages/Settings';
 
 export default function App() {
   return (
@@ -22,6 +25,9 @@ export default function App() {
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="project/:id" element={<Project />} />
         <Route path="pricing" element={<Pricing />} />
+        <Route path="templates" element={<Templates />} />
+        <Route path="templates/:id" element={<TemplateEditor />} />
+        <Route path="settings" element={<Settings />} />
       </Route>
     </Routes>
   );

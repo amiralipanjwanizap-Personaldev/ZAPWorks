@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { Plus, Trash2, Edit2, Save, X, ArrowLeft, DollarSign, Percent, Calculator } from 'lucide-react';
+import { Plus, Trash2, Edit2, Save, X, ArrowLeft, DollarSign, Percent, Calculator, Download } from 'lucide-react';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 interface Project {
   id: string;
@@ -10,6 +12,8 @@ interface Project {
   shoot_days: number;
   profit_margin: number;
   tax_percent: number;
+  base_currency: string;
+  created_at: string;
 }
 
 interface CostItem {
@@ -18,7 +22,11 @@ interface CostItem {
   item_name: string;
   cost_per_unit: number;
   quantity: number;
-  subtotal: number;
+  days: number;
+  original_currency: string;
+  exchange_rate_used: number;
+  converted_subtotal: number;
+  rate_date: string;
 }
 
 const CATEGORIES = ['Equipment', 'Crew', 'Storage', 'Editing', 'Transport', 'Misc'];
@@ -28,11 +36,20 @@ export default function Project() {
   const navigate = useNavigate();
   const [project, setProject] = useState<Project | null>(null);
   const [items, setItems] = useState<CostItem[]>([]);
+  const [currencies, setCurrencies] = useState<any[]>([]);
+  const [businessSettings, setBusinessSettings] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editItem, setEditItem] = useState<Partial<CostItem>>({});
   const [showAddItem, setShowAddItem] = useState(false);
-  const [newItem, setNewItem] = useState({ category: 'Equipment', item_name: '', cost_per_unit: 0, quantity: 1 });
+  const [newItem, setNewItem] = useState({ 
+    category: 'Equipment', 
+    item_name: '', 
+    cost_per_unit: 0, 
+    quantity: 1, 
+    days: 1,
+    original_currency: 'USD'
+  });
 
   useEffect(() => {
     fetchData();
@@ -45,49 +62,180 @@ export default function Project() {
       return;
     }
 
-    const [projectRes, itemsRes] = await Promise.all([
+    const [projectRes, itemsRes, currenciesRes, settingsRes] = await Promise.all([
       supabase.from('projects').select('*').eq('id', id).single(),
-      supabase.from('cost_items').select('*').eq('project_id', id).order('category')
+      supabase.from('project_cost_items').select('*').eq('project_id', id).order('category'),
+      supabase.from('currencies').select('*'),
+      supabase.from('business_settings').select('*').eq('user_id', user.id).single()
     ]);
 
-    if (projectRes.data) setProject(projectRes.data);
+    if (projectRes.data) {
+      setProject(projectRes.data);
+      setNewItem(prev => ({ ...prev, original_currency: projectRes.data.base_currency || 'USD' }));
+    }
     if (itemsRes.data) setItems(itemsRes.data);
+    if (currenciesRes.data && currenciesRes.data.length > 0) {
+      setCurrencies(currenciesRes.data);
+    } else {
+      setCurrencies([{ code: 'USD', name: 'US Dollar' }, { code: 'EUR', name: 'Euro' }, { code: 'TZS', name: 'Tanzanian Shilling' }]);
+    }
+    if (settingsRes.data) setBusinessSettings(settingsRes.data);
     setLoading(false);
+  };
+
+  const getExchangeRate = async (fromCurrency: string, toCurrency: string, date: string) => {
+    if (fromCurrency === toCurrency) return 1.0;
+    
+    const { data } = await supabase
+      .from('exchange_rates')
+      .select('rate')
+      .eq('from_currency', fromCurrency)
+      .eq('to_currency', toCurrency)
+      .lte('rate_date', date)
+      .order('rate_date', { ascending: false })
+      .limit(1)
+      .single();
+      
+    if (data) return data.rate;
+    return 1.0; // Fallback
+  };
+
+  const handleDownloadPDF = () => {
+    if (!project) return;
+
+    const doc = new jsPDF();
+    
+    // Add Logo
+    if (businessSettings?.logo_url) {
+      try {
+        const img = new Image();
+        img.src = businessSettings.logo_url;
+        doc.addImage(img, 'PNG', 14, 10, 30, 30);
+      } catch (e) {
+        console.error('Error adding logo', e);
+      }
+    }
+
+    // Add Business Details
+    doc.setFontSize(10);
+    const startY = businessSettings?.logo_url ? 45 : 20;
+    doc.text(businessSettings?.business_name || '', 14, startY);
+    doc.text(businessSettings?.address || '', 14, startY + 5);
+    doc.text(`Phone: ${businessSettings?.phone || ''}`, 14, startY + 10);
+    doc.text(`Email: ${businessSettings?.email || ''}`, 14, startY + 15);
+
+    // Project Details
+    doc.setFontSize(16);
+    doc.text(`Quote for ${project.client_name}`, 120, 20);
+    doc.setFontSize(10);
+    doc.text(`Event: ${project.event_type}`, 120, 30);
+    doc.text(`Date: ${new Date().toLocaleDateString()}`, 120, 35);
+    doc.text(`Currency: ${project.base_currency}`, 120, 40);
+
+    // Table
+    const tableData = items.map(item => [
+      item.category,
+      item.item_name,
+      `${item.original_currency} ${item.cost_per_unit.toFixed(2)}`,
+      `${item.quantity} x ${item.days}d`,
+      `${project.base_currency} ${item.converted_subtotal.toFixed(2)}`
+    ]);
+
+    autoTable(doc, {
+      startY: startY + 25,
+      head: [['Category', 'Item', 'Cost/Unit', 'Qty/Days', `Subtotal (${project.base_currency})`]],
+      body: tableData,
+    });
+
+    // Summary
+    const baseTotal = items.reduce((sum, item) => sum + item.converted_subtotal, 0);
+    const profitAmount = baseTotal * (project.profit_margin / 100);
+    const taxAmount = (baseTotal + profitAmount) * (project.tax_percent / 100);
+    const finalPrice = baseTotal + profitAmount + taxAmount;
+
+    const finalY = (doc as any).lastAutoTable.finalY + 10;
+    doc.text(`Base Cost: ${baseTotal.toFixed(2)}`, 140, finalY);
+    doc.text(`Profit (${project.profit_margin}%): ${profitAmount.toFixed(2)}`, 140, finalY + 5);
+    doc.text(`Tax (${project.tax_percent}%): ${taxAmount.toFixed(2)}`, 140, finalY + 10);
+    doc.setFontSize(12);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Total: ${project.base_currency} ${finalPrice.toFixed(2)}`, 140, finalY + 20);
+
+    doc.save(`${project.client_name}_Quote.pdf`);
   };
 
   const handleAddItem = async (e: React.FormEvent) => {
     e.preventDefault();
-    const subtotal = newItem.cost_per_unit * newItem.quantity;
+    if (!project) return;
+
+    const projectDate = project.created_at.split('T')[0];
+    const rate = await getExchangeRate(newItem.original_currency, project.base_currency, projectDate);
+    
+    const originalAmount = newItem.cost_per_unit * newItem.quantity * newItem.days;
+    const convertedAmount = originalAmount * rate;
+
+    const itemToInsert = {
+      ...newItem,
+      project_id: id,
+      exchange_rate_used: rate,
+      converted_subtotal: convertedAmount,
+      rate_date: projectDate
+    };
+
     const { data, error } = await supabase
-      .from('cost_items')
-      .insert([{ ...newItem, project_id: id, subtotal }])
+      .from('project_cost_items')
+      .insert([itemToInsert])
       .select()
       .single();
 
     if (!error && data) {
       setItems([...items, data]);
       setShowAddItem(false);
-      setNewItem({ category: 'Equipment', item_name: '', cost_per_unit: 0, quantity: 1 });
+      setNewItem({ 
+        category: 'Equipment', 
+        item_name: '', 
+        cost_per_unit: 0, 
+        quantity: 1, 
+        days: 1,
+        original_currency: project.base_currency || 'USD'
+      });
     }
   };
 
   const handleUpdateItem = async () => {
-    if (!editingId) return;
-    const subtotal = (editItem.cost_per_unit || 0) * (editItem.quantity || 0);
+    if (!editingId || !project) return;
+    
+    const projectDate = project.created_at.split('T')[0];
+    const rate = await getExchangeRate(editItem.original_currency || 'USD', project.base_currency, projectDate);
+    
+    const costPerUnit = editItem.cost_per_unit || 0;
+    const quantity = editItem.quantity || 0;
+    const days = editItem.days || 1;
+    
+    const originalAmount = costPerUnit * quantity * days;
+    const convertedAmount = originalAmount * rate;
+
+    const updateData = {
+      ...editItem,
+      exchange_rate_used: rate,
+      converted_subtotal: convertedAmount,
+      rate_date: projectDate
+    };
+
     const { error } = await supabase
-      .from('cost_items')
-      .update({ ...editItem, subtotal })
+      .from('project_cost_items')
+      .update(updateData)
       .eq('id', editingId);
 
     if (!error) {
-      setItems(items.map(item => item.id === editingId ? { ...item, ...editItem, subtotal } as CostItem : item));
+      setItems(items.map(item => item.id === editingId ? { ...item, ...updateData } as CostItem : item));
       setEditingId(null);
     }
   };
 
   const handleDeleteItem = async (itemId: string) => {
     if (confirm('Delete this item?')) {
-      await supabase.from('cost_items').delete().eq('id', itemId);
+      await supabase.from('project_cost_items').delete().eq('id', itemId);
       setItems(items.filter(item => item.id !== itemId));
     }
   };
@@ -102,7 +250,7 @@ export default function Project() {
   if (loading) return <div className="flex-1 flex items-center justify-center"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#0F172A]"></div></div>;
   if (!project) return <div className="flex-1 flex items-center justify-center text-slate-500">Project not found</div>;
 
-  const baseTotal = items.reduce((sum, item) => sum + item.subtotal, 0);
+  const baseTotal = items.reduce((sum, item) => sum + item.converted_subtotal, 0);
   const profitAmount = baseTotal * (project.profit_margin / 100);
   const taxAmount = (baseTotal + profitAmount) * (project.tax_percent / 100);
   const finalPrice = baseTotal + profitAmount + taxAmount;
@@ -118,21 +266,26 @@ export default function Project() {
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
             <div>
               <h1 className="text-2xl font-bold text-[#0F172A]">{project.client_name}</h1>
-              <p className="text-sm text-slate-500">{project.event_type}</p>
+              <p className="text-sm text-slate-500">{project.event_type} &bull; Base Currency: {project.base_currency}</p>
             </div>
-            <div className="flex items-center gap-4 bg-slate-50 p-3 rounded-xl border border-slate-100">
-              <div className="flex items-center gap-2">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Margin</label>
-                <div className="relative">
-                  <input type="number" value={project.profit_margin} onChange={e => handleProjectUpdate('profit_margin', parseFloat(e.target.value))} className="w-20 pl-2 pr-6 py-1 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-[#0F172A]" />
-                  <Percent className="h-3 w-3 absolute right-2 top-1/2 -translate-y-1/2 text-slate-400" />
+            <div className="flex items-center gap-4">
+              <button onClick={handleDownloadPDF} className="bg-white text-slate-600 border border-slate-200 px-4 py-2 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all flex items-center gap-2">
+                <Download className="h-4 w-4" /> Download PDF
+              </button>
+              <div className="flex items-center gap-4 bg-slate-50 p-3 rounded-xl border border-slate-100">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Margin</label>
+                  <div className="relative">
+                    <input type="number" value={project.profit_margin} onChange={e => handleProjectUpdate('profit_margin', parseFloat(e.target.value))} className="w-20 pl-2 pr-6 py-1 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-[#0F172A]" />
+                    <Percent className="h-3 w-3 absolute right-2 top-1/2 -translate-y-1/2 text-slate-400" />
+                  </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Tax</label>
-                <div className="relative">
-                  <input type="number" value={project.tax_percent} onChange={e => handleProjectUpdate('tax_percent', parseFloat(e.target.value))} className="w-20 pl-2 pr-6 py-1 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-[#0F172A]" />
-                  <Percent className="h-3 w-3 absolute right-2 top-1/2 -translate-y-1/2 text-slate-400" />
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Tax</label>
+                  <div className="relative">
+                    <input type="number" value={project.tax_percent} onChange={e => handleProjectUpdate('tax_percent', parseFloat(e.target.value))} className="w-full pl-2 pr-6 py-1 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-[#0F172A]" />
+                    <Percent className="h-3 w-3 absolute right-2 top-1/2 -translate-y-1/2 text-slate-400" />
+                  </div>
                 </div>
               </div>
             </div>
@@ -148,7 +301,7 @@ export default function Project() {
 
         {showAddItem && (
           <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 mb-6">
-            <form onSubmit={handleAddItem} className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
+            <form onSubmit={handleAddItem} className="grid grid-cols-1 md:grid-cols-7 gap-4 items-end">
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Category</label>
                 <select value={newItem.category} onChange={e => setNewItem({...newItem, category: e.target.value})} className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#0F172A]">
@@ -160,6 +313,12 @@ export default function Project() {
                 <input required type="text" value={newItem.item_name} onChange={e => setNewItem({...newItem, item_name: e.target.value})} className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#0F172A]" placeholder="e.g. Sony A7SIII" />
               </div>
               <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Currency</label>
+                <select value={newItem.original_currency} onChange={e => setNewItem({...newItem, original_currency: e.target.value})} className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#0F172A]">
+                  {currencies.map(c => <option key={c.code || c.id} value={c.code || c.id}>{c.code || c.name}</option>)}
+                </select>
+              </div>
+              <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Cost/Unit</label>
                 <div className="relative">
                   <DollarSign className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -167,11 +326,17 @@ export default function Project() {
                 </div>
               </div>
               <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Qty</label>
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Qty & Days</label>
                 <div className="flex gap-2">
-                  <input required type="number" min="1" value={newItem.quantity} onChange={e => setNewItem({...newItem, quantity: parseInt(e.target.value)})} className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#0F172A]" />
-                  <button type="submit" className="bg-[#FFD600] text-[#0F172A] p-2 rounded-lg hover:bg-yellow-400"><Save className="h-5 w-5" /></button>
-                  <button type="button" onClick={() => setShowAddItem(false)} className="bg-slate-100 text-slate-600 p-2 rounded-lg hover:bg-slate-200"><X className="h-5 w-5" /></button>
+                  <input required type="number" min="1" value={newItem.quantity} onChange={e => setNewItem({...newItem, quantity: parseInt(e.target.value)})} className="w-full px-2 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#0F172A]" title="Quantity" />
+                  <input required type="number" min="1" value={newItem.days} onChange={e => setNewItem({...newItem, days: parseInt(e.target.value)})} className="w-full px-2 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#0F172A]" title="Days" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">&nbsp;</label>
+                <div className="flex gap-2">
+                  <button type="submit" className="bg-[#FFD600] text-[#0F172A] p-2 rounded-lg hover:bg-yellow-400 w-full flex justify-center"><Save className="h-5 w-5" /></button>
+                  <button type="button" onClick={() => setShowAddItem(false)} className="bg-slate-100 text-slate-600 p-2 rounded-lg hover:bg-slate-200 w-full flex justify-center"><X className="h-5 w-5" /></button>
                 </div>
               </div>
             </form>
@@ -186,8 +351,8 @@ export default function Project() {
                   <th className="py-3 px-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Category</th>
                   <th className="py-3 px-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Item</th>
                   <th className="py-3 px-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Cost</th>
-                  <th className="py-3 px-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Qty</th>
-                  <th className="py-3 px-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Subtotal</th>
+                  <th className="py-3 px-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Qty/Days</th>
+                  <th className="py-3 px-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Subtotal ({project.base_currency})</th>
                   <th className="py-3 px-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-center">Actions</th>
                 </tr>
               </thead>
@@ -209,12 +374,23 @@ export default function Project() {
                           <input type="text" value={editItem.item_name} onChange={e => setEditItem({...editItem, item_name: e.target.value})} className="w-full px-2 py-1 text-sm border border-slate-300 rounded" />
                         </td>
                         <td className="py-2 px-4">
-                          <input type="number" value={editItem.cost_per_unit} onChange={e => setEditItem({...editItem, cost_per_unit: parseFloat(e.target.value)})} className="w-full px-2 py-1 text-sm border border-slate-300 rounded text-right" />
+                          <div className="flex gap-1">
+                            <select value={editItem.original_currency} onChange={e => setEditItem({...editItem, original_currency: e.target.value})} className="w-16 px-1 py-1 text-xs border border-slate-300 rounded">
+                              {currencies.map(c => <option key={c.code || c.id} value={c.code || c.id}>{c.code || c.name}</option>)}
+                            </select>
+                            <input type="number" value={editItem.cost_per_unit} onChange={e => setEditItem({...editItem, cost_per_unit: parseFloat(e.target.value)})} className="w-full px-2 py-1 text-sm border border-slate-300 rounded text-right" />
+                          </div>
                         </td>
                         <td className="py-2 px-4">
-                          <input type="number" value={editItem.quantity} onChange={e => setEditItem({...editItem, quantity: parseInt(e.target.value)})} className="w-full px-2 py-1 text-sm border border-slate-300 rounded text-right" />
+                          <div className="flex gap-1">
+                            <input type="number" value={editItem.quantity} onChange={e => setEditItem({...editItem, quantity: parseInt(e.target.value)})} className="w-12 px-1 py-1 text-sm border border-slate-300 rounded text-right" title="Qty" />
+                            <span className="text-slate-400 self-center">x</span>
+                            <input type="number" value={editItem.days} onChange={e => setEditItem({...editItem, days: parseInt(e.target.value)})} className="w-12 px-1 py-1 text-sm border border-slate-300 rounded text-right" title="Days" />
+                          </div>
                         </td>
-                        <td className="py-2 px-4 text-right font-medium text-[#0F172A]">${((editItem.cost_per_unit||0) * (editItem.quantity||0)).toFixed(2)}</td>
+                        <td className="py-2 px-4 text-right font-medium text-[#0F172A]">
+                          {project.base_currency} {((editItem.cost_per_unit||0) * (editItem.quantity||0) * (editItem.days||1) * (editItem.exchange_rate_used||1)).toFixed(2)}
+                        </td>
                         <td className="py-2 px-4 text-center">
                           <div className="flex justify-center gap-2">
                             <button onClick={handleUpdateItem} className="text-green-600 hover:text-green-800 p-1"><Save className="h-4 w-4" /></button>
@@ -226,9 +402,16 @@ export default function Project() {
                       <>
                         <td className="py-3 px-4 text-sm text-slate-500">{item.category}</td>
                         <td className="py-3 px-4 text-sm font-medium text-[#0F172A]">{item.item_name}</td>
-                        <td className="py-3 px-4 text-sm text-slate-600 text-right">${item.cost_per_unit.toFixed(2)}</td>
-                        <td className="py-3 px-4 text-sm text-slate-600 text-right">{item.quantity}</td>
-                        <td className="py-3 px-4 text-sm font-bold text-[#0F172A] text-right">${item.subtotal.toFixed(2)}</td>
+                        <td className="py-3 px-4 text-sm text-slate-600 text-right">
+                          {item.original_currency} {item.cost_per_unit.toFixed(2)}
+                        </td>
+                        <td className="py-3 px-4 text-sm text-slate-600 text-right">{item.quantity} &times; {item.days}d</td>
+                        <td className="py-3 px-4 text-sm font-bold text-[#0F172A] text-right">
+                          {project.base_currency} {item.converted_subtotal.toFixed(2)}
+                          {item.exchange_rate_used !== 1 && (
+                            <div className="text-[10px] text-slate-400 font-normal">Rate: {item.exchange_rate_used}</div>
+                          )}
+                        </td>
                         <td className="py-3 px-4 text-center">
                           <div className="flex justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity" style={{opacity: 1}}>
                             <button onClick={() => { setEditingId(item.id); setEditItem(item); }} className="text-slate-400 hover:text-[#0F172A] p-1"><Edit2 className="h-4 w-4" /></button>
@@ -250,24 +433,24 @@ export default function Project() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <div className="flex items-center gap-2 mb-2 md:hidden">
             <Calculator className="h-4 w-4 text-[#FFD600]" />
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Summary</span>
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Summary ({project.base_currency})</span>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-8 items-center">
             <div className="hidden md:block">
               <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Base Cost</div>
-              <div className="text-lg font-medium text-slate-700">${baseTotal.toFixed(2)}</div>
+              <div className="text-lg font-medium text-slate-700">{baseTotal.toFixed(2)}</div>
             </div>
             <div>
               <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Profit ({project.profit_margin}%)</div>
-              <div className="text-lg font-medium text-green-600">+${profitAmount.toFixed(2)}</div>
+              <div className="text-lg font-medium text-green-600">+{profitAmount.toFixed(2)}</div>
             </div>
             <div>
               <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Tax ({project.tax_percent}%)</div>
-              <div className="text-lg font-medium text-slate-500">+${taxAmount.toFixed(2)}</div>
+              <div className="text-lg font-medium text-slate-500">+{taxAmount.toFixed(2)}</div>
             </div>
             <div className="col-span-2 md:col-span-1 border-t md:border-t-0 md:border-l border-slate-200 pt-2 md:pt-0 md:pl-8">
               <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Final Quote</div>
-              <div className="text-3xl font-extrabold text-[#0F172A]">${finalPrice.toFixed(2)}</div>
+              <div className="text-3xl font-extrabold text-[#0F172A]">{finalPrice.toFixed(2)}</div>
             </div>
           </div>
         </div>
