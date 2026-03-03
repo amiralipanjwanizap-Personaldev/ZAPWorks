@@ -42,7 +42,7 @@ export default function Settings() {
       .from('business_settings')
       .select('*')
       .eq('user_id', user.id)
-      .single();
+      .maybeSingle(); // Use maybeSingle to avoid error when no rows found
 
     if (data) {
       setSettings(data);
@@ -56,15 +56,23 @@ export default function Settings() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
+    // Create payload and remove id if it's empty to avoid UUID validation errors
+    const payload: any = { ...settings, user_id: user.id };
+    if (!payload.id) {
+      delete payload.id;
+    }
+
     const { error } = await supabase
       .from('business_settings')
-      .upsert({ ...settings, user_id: user.id }, { onConflict: 'user_id' });
+      .upsert(payload, { onConflict: 'user_id' });
 
     if (!error) {
       alert('Settings saved successfully!');
+      // Refresh settings to get the new ID if it was an insert
+      fetchSettings();
     } else {
       console.error('Error saving settings:', error);
-      alert('Failed to save settings.');
+      alert('Failed to save settings: ' + error.message);
     }
     setSaving(false);
   };
